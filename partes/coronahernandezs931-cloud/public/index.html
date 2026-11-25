@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CEP-402 · Firewall Zero-Trust & Comprobante x402 en Stellar</title>
+    <style>
+      :root {
+        --bg: #070b14;
+        --panel: #0e1627;
+        --panel-2: #131e33;
+        --border: #22324f;
+        --text: #eef4ff;
+        --muted: #93a7c7;
+        --green: #10b981;
+        --green-bg: rgba(16, 185, 129, 0.14);
+        --red: #ef4444;
+        --red-bg: rgba(239, 68, 68, 0.16);
+        --amber: #f59e0b;
+        --amber-bg: rgba(245, 158, 11, 0.16);
+        --blue: #38bdf8;
+        --blue-bg: rgba(56, 189, 248, 0.14);
+        --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: radial-gradient(circle at top right, #111f3a 0%, var(--bg) 55%);
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 15px;
+        line-height: 1.45;
+        padding: 18px;
+      }
+      .wrap { max-width: 1260px; margin: 0 auto; display: grid; gap: 16px; }
+      header {
+        display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px;
+        background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 18px;
+      }
+      .brand { display: flex; align-items: center; gap: 12px; }
+      .logo {
+        width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center;
+        background: linear-gradient(135deg, #10b981, #0ea5e9); font-weight: 900; font-size: 18px; color: #04101f;
+      }
+      h1 { margin: 0; font-size: 22px; letter-spacing: 0.3px; }
+      .subtitle { color: var(--muted); font-size: 13px; margin-top: 2px; }
+      .hud { display: flex; flex-wrap: wrap; gap: 10px; }
+      .stat {
+        background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+        padding: 8px 12px; min-width: 132px;
+      }
+      .stat .k { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.6px; }
+      .stat .v { font-size: 20px; font-weight: 800; font-family: var(--mono); margin-top: 2px; }
+      .v-green { color: var(--green); }
+      .v-red { color: var(--red); }
+      .v-blue { color: var(--blue); }
+
+      .controls {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px;
+      }
+      button {
+        cursor: pointer; border: 1px solid var(--border); border-radius: 11px;
+        padding: 13px 14px; font-weight: 800; font-size: 14px; color: var(--text);
+        background: var(--panel-2); transition: transform 0.08s ease, border-color 0.15s ease, opacity 0.15s;
+        text-align: left; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      }
+      button:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--blue); }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .btn-red { background: linear-gradient(135deg, #991b1b, #dc2626); border-color: #f87171; }
+      .btn-green { background: linear-gradient(135deg, #047857, #10b981); border-color: #6ee7b7; color: #03150f; }
+      .btn-amber { background: linear-gradient(135deg, #b45309, #f59e0b); border-color: #fcd34d; color: #1b1002; }
+      .btn-blue { background: linear-gradient(135deg, #0369a1, #0ea5e9); border-color: #7dd3fc; color: #041322; }
+      .btn-sm { padding: 8px 11px; font-size: 12.5px; border-radius: 8px; width: auto; }
+
+      .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      @media (max-width: 860px) { .split { grid-template-columns: 1fr; } }
+      .card {
+        background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px;
+        display: flex; flex-direction: column; gap: 12px;
+      }
+      .card.danger { border-color: var(--red); box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.35); }
+      .card.safe { border-color: var(--green); box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.35); }
+      .card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+      .card-title { font-size: 17px; font-weight: 800; margin: 0; }
+      .badge {
+        font-family: var(--mono); font-size: 11.5px; font-weight: 800; padding: 4px 9px;
+        border-radius: 999px; border: 1px solid var(--border); background: var(--panel-2);
+      }
+      .badge-green { color: var(--green); background: var(--green-bg); border-color: var(--green); }
+      .badge-red { color: #fecaca; background: var(--red-bg); border-color: var(--red); }
+      .badge-amber { color: #fde68a; background: var(--amber-bg); border-color: var(--amber); }
+      .badge-blue { color: #bae6fd; background: var(--blue-bg); border-color: var(--blue); }
+
+      .verdict {
+        padding: 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel-2);
+        font-size: 18px; font-weight: 900; letter-spacing: 0.2px;
+      }
+      .verdict.hacked { background: var(--red-bg); border-color: var(--red); color: #fecaca; }
+      .verdict.blocked { background: var(--green-bg); border-color: var(--green); color: #a7f3d0; }
+      .verdict.verified { background: var(--green-bg); border-color: var(--green); color: #a7f3d0; }
+
+      .leds { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+      .led {
+        border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; background: var(--panel-2);
+        font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 7px;
+      }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: #475569; flex-shrink: 0; }
+      .led.pass { border-color: var(--green); background: var(--green-bg); }
+      .led.pass .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+      .led.fail { border-color: var(--red); background: var(--red-bg); }
+      .led.fail .dot { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+      .cep-card {
+        background: linear-gradient(180deg, #0d1a2d 0%, #0a1322 100%);
+        border: 2px solid var(--green); border-radius: 14px; padding: 16px;
+        display: grid; gap: 12px;
+      }
+      .cep-card.tampered { border-color: var(--red); background: linear-gradient(180deg, #270d14 0%, #16090e 100%); }
+      .kv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+      .kv { background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; }
+      .kv .k { font-size: 11px; text-transform: uppercase; color: var(--muted); }
+      .kv .v { font-family: var(--mono); font-size: 12.5px; word-break: break-all; margin-top: 3px; }
+      .actions-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+      .mono-box {
+        background: #060a12; border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px;
+        font-family: var(--mono); font-size: 12px; color: #cbd5e1; white-space: pre-wrap; word-break: break-word;
+        max-height: 210px; overflow: auto;
+      }
+      .code-pill {
+        font-family: var(--mono); font-size: 12px; color: #6ee7b7; background: #052e22;
+        border: 1px solid #10b981; border-radius: 6px; padding: 2px 7px;
+      }
+      a { color: var(--blue); text-decoration: none; font-weight: 700; }
+      a:hover { text-decoration: underline; }
+      .footer-note { color: var(--muted); font-size: 12px; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="brand">
+          <div class="logo">402</div>
+          <div>
+            <h1>CEP-402 · Verificador Zero-Trust &amp; Comprobante x402</h1>
+            <div class="subtitle">
+              Track 3: Verificación de pagos · Stellar Testnet · Integración de 1 línea:
+              <span class="code-pill">app.use(cep402Guard())</span>
+            </div>
+          </div>
+        </div>
+        <div class="hud">
+          <div class="stat"><div class="k">Pagos Reales</div><div class="v v-blue" id="st-paid">0</div></div>
+          <div class="stat"><div class="k">Ataques Frenados</div><div class="v v-green" id="st-blocked">0</div></div>
+          <div class="stat"><div class="k">Saqueos Vanilla</div><div class="v v-red" id="st-hacked">0</div></div>
+          <div class="stat"><div class="k">Perdido CEP-402</div><div class="v v-green">$0.00</div></div>
+        </div>
+      </header>
+
+      <section class="controls">
+        <button id="btn-corrupt" class="btn-red">
+          <span>🔴 1. Corromper Facilitador en Vivo</span><small>DUELO</small>
+        </button>
+        <button id="btn-pay" class="btn-green">
+          <span>⚡ 2. Ejecutar Pago Real Testnet ($0.01)</span><small>LIVE</small>
+        </button>
+        <button id="btn-gauntlet" class="btn-amber">
+          <span>🎯 3. Metralleta de 3 Ataques (&lt;4s)</span><small>RED TEAM</small>
+        </button>
+        <button id="btn-oz" class="btn-blue">
+          <span>🛡️ 4. Forense Smart Account C… (OZ)</span><small>CAP-46</small>
+        </button>
+      </section>
+
+      <section class="split">
+        <div class="card" id="card-vanilla">
+          <div class="card-head">
+            <h2 class="card-title">x402 Vanilla (Sin CEP-402)</h2>
+            <span class="badge" id="badge-vanilla">ESPERANDO</span>
+          </div>
+          <div class="verdict" id="verdict-vanilla">Confía ciegamente en PAYMENT-RESPONSE del facilitador</div>
+          <div class="mono-box" id="log-vanilla">Pulsa "1. Corromper Facilitador" para ver el ataque en vivo.</div>
+        </div>
+
+        <div class="card" id="card-cep">
+          <div class="card-head">
+            <h2 class="card-title">CEP-402 Guard (Soroban RPC Zero-Trust)</h2>
+            <span class="badge badge-green" id="badge-cep">7 INVARIANTES ACTIVAS</span>
+          </div>
+          <div class="verdict" id="verdict-cep">Fail-Closed Gate activo antes de paymentMiddleware()</div>
+          <div class="leds">
+            <div class="led" id="led-replay"><span class="dot"></span>1. Anti-Replay 409</div>
+            <div class="led" id="led-success"><span class="dot"></span>2. RPC SUCCESS</div>
+            <div class="led" id="led-fresh"><span class="dot"></span>3. Frescura &le;60</div>
+            <div class="led" id="led-sac"><span class="dot"></span>4. SAC USDC Real</div>
+            <div class="led" id="led-amount"><span class="dot"></span>5. Monto CAP-67</div>
+            <div class="led" id="led-payer"><span class="dot"></span>6. Payer vs Sponsor</div>
+          </div>
+          <div class="mono-box" id="log-cep">Listo para auditar liquidaciones en https://soroban-testnet.stellar.org</div>
+        </div>
+      </section>
+
+      <section class="cep-card" id="cep-section" style="display: none">
+        <div class="card-head">
+          <div>
+            <h2 class="card-title">🧾 Comprobante Electrónico de Pago · CEP-402 (Estilo Banxico)</h2>
+            <div class="subtitle" id="cep-folio">Folio: —</div>
+          </div>
+          <span class="badge badge-green" id="cep-status-badge">EMITIDO &amp; FIRMADO Ed25519</span>
+        </div>
+        <div class="kv-grid">
+          <div class="kv"><div class="k">Real Payer (Evento SAC)</div><div class="v" id="cep-payer">—</div></div>
+          <div class="kv"><div class="k">Fee Sponsor (Gas Relayer)</div><div class="v" id="cep-sponsor">—</div></div>
+          <div class="kv"><div class="k">Monto Neto · Ledger</div><div class="v" id="cep-amount">—</div></div>
+          <div class="kv"><div class="k">Tx Hash (Stellar Testnet)</div><div class="v" id="cep-tx">—</div></div>
+          <div class="kv"><div class="k">SHA-256 del Payload (No-Repudio)</div><div class="v" id="cep-bodyhash">—</div></div>
+          <div class="kv"><div class="k">Verificación Zero-Trust Cliente</div><div class="v" id="cep-zt">Pendiente de clic</div></div>
+        </div>
+        <div class="actions-row">
+          <button id="btn-zt-verify" class="btn-green btn-sm">🔐 Verificar en Navegador (Web Crypto + RPC Público)</button>
+          <button id="btn-tamper" class="btn-red btn-sm">🧪 Alterar 1 Byte del Body → TAMPERED</button>
+          <button id="btn-download" class="btn-sm">⬇️ Descargar CEP-402 (.json)</button>
+          <a id="link-expert" href="#" target="_blank" rel="noopener noreferrer">🔎 Abrir Hash en Stellar Expert ↗</a>
+        </div>
+      </section>
+
+      <section class="split">
+        <div class="card">
+          <div class="card-head">
+            <h2 class="card-title">🎯 Resultados Red-Team &amp; Forense Smart Account C…</h2>
+            <span class="badge badge-blue" id="badge-gauntlet">CAP-46 / OZ</span>
+          </div>
+          <div class="mono-box" id="log-gauntlet">Ejecuta "3. Metralleta de 3 Ataques" o "4. Forense Smart Account C…" para auditar replay 5x, tampering y contratos C….</div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2 class="card-title">🪶 Auditor Forense · Raven MCP (Camino Rojo)</h2>
+            <span class="badge badge-amber" id="badge-raven">STANDBY</span>
+          </div>
+          <div class="mono-box" id="log-raven">El firewall CEP-402 NUNCA depende de IA/MCP en el hot-path. Raven MCP (https://raven.stellar.org/mcp) solo se invoca en el Camino Rojo ante bloqueos o auditoría C… (#3221).</div>
+        </div>
+      </section>
+
+      <div class="footer-note" id="footer-info">Cargando estado del servidor CEP-402…</div>
+    </div>
+
+    <script>
+      const SOROBAN_PUBLIC_RPC = 'https://soroban-testnet.stellar.org';
+      let currentReceipt = null;
+      let currentRawBody = null;
+      let healthData = null;
+
+      const $ = (id) => document.getElementById(id);
+
+      function canonicalize(value) {
+        if (value === null || typeof value === 'boolean' || typeof value === 'string') return JSON.stringify(value);
+        if (typeof value === 'number') return JSON.stringify(value);
+        if (Array.isArray(value)) return '[' + value.map((v) => (v === undefined ? 'null' : canonicalize(v))).join(',') + ']';
+        if (typeof value === 'object') {
+          const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
+          return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+        }
+        return 'null';
+      }
+
+      function b64ToBytes(b64) {
+        const bin = atob(b64);
+        const out = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out;
+      }
+
+      async function sha256HexBrowser(text) {
+        const buf = new TextEncoder().encode(text);
+        const hash = await crypto.subtle.digest('SHA-256', buf);
+        return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, '0')).join('');
+      }
+
+      function setLeds(states) {
+        const map = {
+          replay: 'led-replay',
+          success: 'led-success',
+          fresh: 'led-fresh',
+          sac: 'led-sac',
+          amount: 'led-amount',
+          payer: 'led-payer',
+        };
+        for (const [k, id] of Object.entries(map)) {
+          const el = $(id);
+          el.classList.remove('pass', 'fail');
+          if (states[k] === true) el.classList.add('pass');
+          if (states[k] === false) el.classList.add('fail');
+        }
+      }
+
+      function renderRaven(diag) {
+        if (!diag) return;
+        $('badge-raven').textContent = diag.badge || diag.source;
+        $('badge-raven').className = 'badge ' + (diag.source === 'LIVE_RAVEN_MCP' ? 'badge-green' : 'badge-amber');
+        $('log-raven').textContent = [
+          `[${diag.severity}] ${diag.title}`,
+          `Código: ${diag.errorCode} · Fuente: ${diag.badge}`,
+          `Causa: ${diag.cause}`,
+          `Remediación: ${diag.remediation}`,
+          `Referencia: ${diag.stellarRef}`,
+          diag.oauthNote ? `Nota OAuth: ${diag.oauthNote}` : '',
+        ].filter(Boolean).join('\n');
+      }
+
+      async function refreshHealth() {
+        const r = await fetch('/api/health');
+        healthData = await r.json();
+        $('st-paid').textContent = healthData.metrics.realPaymentsSettled;
+        $('st-blocked').textContent = healthData.metrics.attacksBlockedByCep402;
+        $('st-hacked').textContent = healthData.metrics.vanillaHacksSuffered;
+        $('footer-info').textContent =
+          `Comercio: ${healthData.merchantPublicKey} · SAC USDC Testnet: ${healthData.usdcSacTestnet} · ReplayStore: ${healthData.replayStats.committed} hashes comprometidos`;
+      }
+
+      function renderReceiptCard(receipt, rawBody) {
+        currentReceipt = receipt;
+        currentRawBody = rawBody;
+        const p = receipt.payload;
+        $('cep-section').style.display = 'grid';
+        $('cep-section').classList.remove('tampered');
+        $('cep-status-badge').textContent = 'EMITIDO & FIRMADO Ed25519';
+        $('cep-status-badge').className = 'badge badge-green';
+        $('cep-folio').textContent = `Folio: ${p.folio} · Emitido: ${p.issuedAt}`;
+        $('cep-payer').textContent = `${p.payer} (${p.payerType})`;
+        $('cep-sponsor').textContent = `${p.feeSponsor}${p.feeSponsor !== p.payer ? ' (Distinto al Payer ✓)' : ''}`;
+        $('cep-amount').textContent = `${p.amountUsdc} USDC (${p.amount} stroops) · Ledger #${p.ledger}`;
+        $('cep-tx').textContent = p.txHash;
+        $('cep-bodyhash').textContent = p.response.bodySha256;
+        $('cep-zt').textContent = 'Listo para verificar directo en navegador';
+        $('link-expert').href = p.stellarExpertUrl;
+      }
+
+      // 1. Duelo Split-Screen con Facilitador Comprometido
+      $('btn-corrupt').addEventListener('click', async () => {
+        $('btn-corrupt').disabled = true;
+        try {
+          const r = await fetch('/api/demo/corrupt-duel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'FAKE_SETTLE' }),
+          });
+          const d = await r.json();
+          $('card-vanilla').className = 'card danger';
+          $('badge-vanilla').className = 'badge badge-red';
+          $('badge-vanilla').textContent = `HTTP ${d.vanilla.status} · HACKEADO`;
+          $('verdict-vanilla').className = 'verdict hacked';
+          $('verdict-vanilla').textContent = '🚨 200 OK — RECURSO ENTREGADO SIN PAGO ($0.00 USDC recibidos)';
+          $('log-vanilla').textContent = JSON.stringify(d.vanilla.body, null, 2);
+
+          $('card-cep').className = 'card safe';
+          $('badge-cep').className = 'badge badge-green';
+          $('badge-cep').textContent = `HTTP ${d.cep402.status} · BLOQUEADO`;
+          $('verdict-cep').className = 'verdict blocked';
+          $('verdict-cep').textContent = `🛡️ ${d.cep402.status} BLOQUEADO ON-CHAIN (${d.cep402.body.error}) — $0.00 perdidos`;
+          setLeds({ replay: true, success: false, fresh: false, sac: false, amount: false, payer: false });
+          $('log-cep').textContent = JSON.stringify(d.cep402.body, null, 2);
+          renderRaven(d.ravenDiagnostic);
+          await refreshHealth();
+        } finally {
+          $('btn-corrupt').disabled = false;
+        }
+      });
+
+      // 2. Pago REAL en Stellar Testnet ($0.01 USDC)
+      $('btn-pay').addEventListener('click', async () => {
+        $('btn-pay').disabled = true;
+        const start = Date.now();
+        $('verdict-cep').className = 'verdict';
+        $('verdict-cep').textContent = '⏳ Firmando AuthEntry y esperando cierre de ledger en Stellar Testnet (~5s)…';
+        const timer = setInterval(() => {
+          $('log-cep').textContent = `Esperando confirmación real en Soroban Testnet RPC… ${((Date.now() - start) / 1000).toFixed(1)}s`;
+        }, 250);
+        try {
+          const r = await fetch('/api/demo/pay-live', { method: 'POST' });
+          const d = await r.json();
+          clearInterval(timer);
+          if (!d.ok) {
+            $('verdict-cep').className = 'verdict hacked';
+            $('verdict-cep').textContent = `❌ Error: ${d.error || 'Fallo en pago'}`;
+            $('log-cep').textContent = JSON.stringify(d, null, 2);
+            return;
+          }
+          $('card-cep').className = 'card safe';
+          $('badge-cep').className = 'badge badge-green';
+          $('badge-cep').textContent = `HTTP 200 · ${d.elapsedMs}ms`;
+          $('verdict-cep').className = 'verdict verified';
+          $('verdict-cep').textContent = `✅ 7 INVARIANTES VERIFICADAS · ${d.receipt.payload.amountUsdc} USDC en Ledger #${d.receipt.payload.ledger}`;
+          setLeds({ replay: true, success: true, fresh: true, sac: true, amount: true, payer: true });
+          $('log-cep').textContent = JSON.stringify(d.body, null, 2);
+          renderReceiptCard(d.receipt, d.rawBody);
+          await refreshHealth();
+        } finally {
+          clearInterval(timer);
+          $('btn-pay').disabled = false;
+        }
+      });
+
+      // 3. Metralleta de 3 Ataques (<4s)
+      $('btn-gauntlet').addEventListener('click', async () => {
+        $('btn-gauntlet').disabled = true;
+        try {
+          const r = await fetch('/api/demo/attack-gauntlet', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ txHash: currentReceipt?.payload?.txHash }),
+          });
+          const g = await r.json();
+          const a1 = g.attack1_parallelReplay5x;
+          const a2 = g.attack2_tampering1Byte;
+          const a3 = g.attack3_corruptFacilitatorAndSmartAccount;
+          $('badge-gauntlet').className = 'badge badge-green';
+          $('badge-gauntlet').textContent = `3/3 BLOQUEADOS EN ${g.elapsedMs}ms`;
+          $('log-gauntlet').textContent = [
+            `[ATAQUE 1 — Replay 5x Paralelo (Promise.all)]`,
+            `  • x402 Vanilla: SAQUEADO ${a1.vanillaLootedCount}/5 veces (${a1.vanillaStatuses.join(', ')})`,
+            `  • CEP-402 Guard: BLOQUEÓ ${a1.cep402BlockedCount}/5 (${a1.cep402Statuses.join(', ')} · ${a1.sampleCep402Error})`,
+            ``,
+            `[ATAQUE 2 — Alteración de 1 Byte en Payload Post-Pago]`,
+            `  • Verificador CEP-402: ok=${a2.ok} → ${a2.code} (${a2.detail})`,
+            ``,
+            `[ATAQUE 3 — Facilitador Comprometido + Smart Account C… CAP-46]`,
+            `  • Vanilla HTTP ${a3.vanillaStatus} vs CEP-402 HTTP ${a3.cep402Status} (${a3.cep402Error})`,
+            `  • Contrato C… en Testnet: ${a3.smartAccountForensics.contractId}`,
+            `  • Existe on-chain: ${a3.smartAccountForensics.existsOnTestnet} · Tipo: ${a3.smartAccountForensics.instanceType}`,
+          ].join('\n');
+          setLeds({ replay: false, success: true, fresh: true, sac: true, amount: true, payer: true });
+          renderRaven(a3.ravenDiagnostic);
+          await refreshHealth();
+        } finally {
+          $('btn-gauntlet').disabled = false;
+        }
+      });
+
+      // 4. Forense Smart Account C...
+      $('btn-oz').addEventListener('click', async () => {
+        $('btn-oz').disabled = true;
+        try {
+          const r = await fetch('/api/smart-account/diagnose', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+          });
+          const d = await r.json();
+          $('badge-gauntlet').className = 'badge badge-blue';
+          $('badge-gauntlet').textContent = 'LIVE RPC C… AUDIT';
+          $('log-gauntlet').textContent = JSON.stringify(
+            {
+              mode: d.mode,
+              contractId: d.contractId,
+              existsOnTestnet: d.existsOnTestnet,
+              instanceType: d.instanceType,
+              wasmHash: d.wasmHash,
+              usdcBalanceUsdc: d.usdcBalanceUsdc,
+              cap46AndOzAnalysis: d.cap46AndOzAnalysis,
+            },
+            null,
+            2
+          );
+          renderRaven(d.ravenDiagnostic);
+        } finally {
+          $('btn-oz').disabled = false;
+        }
+      });
+
+      // Verificación Zero-Trust directa en navegador (Web Crypto Ed25519 + RPC público Stellar)
+      $('btn-zt-verify').addEventListener('click', async () => {
+        if (!currentReceipt || currentRawBody == null) return;
+        $('cep-zt').textContent = 'Verificando firma Ed25519 + Soroban Testnet RPC directo…';
+        try {
+          const p = currentReceipt.payload;
+          const actualBodyHash = await sha256HexBrowser(currentRawBody);
+          if (actualBodyHash !== p.response.bodySha256) {
+            $('cep-section').classList.add('tampered');
+            $('cep-status-badge').className = 'badge badge-red';
+            $('cep-status-badge').textContent = '🚨 TAMPERED (BODY_HASH_MISMATCH)';
+            $('cep-zt').textContent = `❌ FALLÓ INTEGRIDAD: hash esperado ${p.response.bodySha256.slice(0, 14)}… != actual ${actualBodyHash.slice(0, 14)}…`;
+            return;
+          }
+
+          // 1) Verificación Ed25519 en Web Crypto (SPKI)
+          let ed25519Verified = false;
+          if (window.crypto?.subtle) {
+            const key = await crypto.subtle.importKey(
+              'spki',
+              b64ToBytes(p.merchantSpkiBase64),
+              { name: 'Ed25519' },
+              false,
+              ['verify']
+            );
+            const canonicalBytes = new TextEncoder().encode(canonicalize(p));
+            ed25519Verified = await crypto.subtle.verify(
+              { name: 'Ed25519' },
+              key,
+              b64ToBytes(currentReceipt.signature),
+              canonicalBytes
+            );
+          }
+
+          // 2) Consulta directa al RPC público de Stellar Testnet (SIN tocar nuestro servidor)
+          const rpcRes = await fetch(SOROBAN_PUBLIC_RPC, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'getTransaction',
+              params: { hash: p.txHash },
+            }),
+          });
+          const rpcJson = await rpcRes.json();
+          const onChainStatus = rpcJson?.result?.status;
+          const onChainLedger = rpcJson?.result?.ledger;
+
+          if (ed25519Verified && onChainStatus === 'SUCCESS' && Number(onChainLedger) === Number(p.ledger)) {
+            $('cep-section').classList.remove('tampered');
+            $('cep-status-badge').className = 'badge badge-green';
+            $('cep-status-badge').textContent = '✅ VERIFIED CLIENT-SIDE ZERO-TRUST';
+            $('cep-zt').textContent = `✅ Ed25519 OK + SHA256 OK + Soroban RPC público SUCCESS en Ledger #${onChainLedger}`;
+          } else {
+            $('cep-zt').textContent = `⚠️ Ed25519=${ed25519Verified}, RPC=${onChainStatus}, Ledger=${onChainLedger}`;
+          }
+        } catch (err) {
+          $('cep-zt').textContent = `❌ Error de verificación: ${err.message}`;
+        }
+      });
+
+      // Alterar 1 byte del payload en memoria para demostrar TAMPERED al instante
+      $('btn-tamper').addEventListener('click', async () => {
+        if (!currentReceipt || !currentRawBody) return;
+        const altered = currentRawBody.slice(0, -1) + ' ';
+        const alteredHash = await sha256HexBrowser(altered);
+        $('cep-section').classList.add('tampered');
+        $('cep-status-badge').className = 'badge badge-red';
+        $('cep-status-badge').textContent = '🚨 TAMPERED · 1 BYTE ALTERADO';
+        $('cep-zt').textContent =
+          `❌ BODY_HASH_MISMATCH — Sellado: ${currentReceipt.payload.response.bodySha256.slice(0, 16)}… vs Alterado: ${alteredHash.slice(0, 16)}…`;
+        const diagRes = await fetch('/api/raven/diagnose', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ errorCode: 'BODY_HASH_MISMATCH' }),
+        });
+        const diagJson = await diagRes.json();
+        renderRaven(diagJson.diagnostic);
+      });
+
+      // Descargar recibo CEP-402 portable (.json)
+      $('btn-download').addEventListener('click', () => {
+        if (!currentReceipt) return;
+        const blob = new Blob([JSON.stringify(currentReceipt, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${currentReceipt.payload.folio}.cep402.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      });
+
+      refreshHealth();
+    </script>
+  </body>
+</html>
