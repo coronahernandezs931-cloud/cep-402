@@ -436,7 +436,7 @@ export async function createCep402App({
         req.body?.txHash ||
         metrics.lastReceipt?.payload?.txHash ||
         facilitator.seeds.lastRealTxHash ||
-        'a'.repeat(64);
+        '25adcb23697676e05e7efaaf5e7a562a25f06f3c0aaa782d0a9ff0795ab4be8c';
 
       const probe = await fetch(`${baseUrl}/api/cep402/dato`);
       const reqHeader = probe.headers.get('payment-required');

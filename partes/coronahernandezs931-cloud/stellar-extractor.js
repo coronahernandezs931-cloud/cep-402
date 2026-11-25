@@ -16,7 +16,7 @@ export const DEFAULT_MAX_LEDGER_AGE = 60; // ~5 minutos en Stellar (~5s/ledger)
 export const STELLAR_EXPERT_TX_BASE = 'https://stellar.expert/explorer/testnet/tx/';
 export const STELLAR_EXPERT_CONTRACT_BASE = 'https://stellar.expert/explorer/testnet/contract/';
 
-const POLL_DELAYS_MS = [0, 600, 900, 1200, 1500, 1800]; // hasta ~6s absorbiendo propagación RPC
+const POLL_DELAYS_MS = [0, 450, 750]; // hasta ~1.2s absorbiendo propagación RPC sin frenar la demo
 
 /**
  * Normaliza XDR de `@stellar/stellar-sdk@17.4.0` (base64, instancia XDR v17 o JSON SEP-0050).
