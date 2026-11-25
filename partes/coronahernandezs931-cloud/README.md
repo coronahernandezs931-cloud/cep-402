@@ -12,3 +12,32 @@ Middleware Zero-Trust de verificación de pagos x402 sobre Stellar Testnet + Com
 - `auditor-raven.js` + `mcp.json`: Cliente Streamable HTTP a `https://raven.stellar.org/mcp` exclusivo para el Camino Rojo, con degradación explícita a Snapshot Verificado (`RAVEN MCP: LIVE` vs `RAVEN VERIFIED SNAPSHOT`) para pruebas offline deterministas.
 - `server.js` + `public/index.html`: Servidor Express 5 single-origin con UI Split-Screen (`x402 Vanilla` vs `CEP-402 Guard`), tarjeta descargable CEP-402 y metralleta de 3 ataques.
 - `live-demo.js`: Preflight y ejecución real end-to-end en Stellar Testnet.
+- `cep402.test.js`: 16 pruebas automatizadas (`node:test`) 100% deterministas y offline (`# fail 0` sin requerir `.env`).
+
+## Cómo correr mi parte
+
+```bash
+# 1. Correr todas las pruebas deterministas (funciona incluso sin .env -> # fail 0)
+npm test
+
+# 2. Levantar la UI Split-Screen + APIs Vanilla/CEP-402 + Facilitador Dual en http://127.0.0.1:3000
+npm start
+
+# 3. Verificar saldos, trustlines USDC y Soroban RPC en Testnet (requiere .env)
+npm run preflight
+
+# 4. Ejecutar demo CLI completo en Stellar Testnet (Duelo + Pago Real + Metralleta de 3 Ataques)
+npm run demo
+```
+
+## Hash de prueba
+
+- Pago real de `0.01 USDC` verificado Zero-Trust (Folio `CEP402-5909535-25ADCB23`, Ledger `5909535`, `Fee Sponsor` distinto al `Real Payer`):
+  - `25adcb23697676e05e7efaaf5e7a562a25f06f3c0aaa782d0a9ff0795ab4be8c`
+  - Verlo: https://stellar.expert/explorer/testnet/tx/25adcb23697676e05e7efaaf5e7a562a25f06f3c0aaa782d0a9ff0795ab4be8c
+- Pago adicional confirmado en Testnet (Ledger `5909443`):
+  - `e4d0cdf63792e0c66ee86450790e3817a2ea9ea06fe30c8a85378caa30c99c3b`
+  - Verlo: https://stellar.expert/explorer/testnet/tx/e4d0cdf63792e0c66ee86450790e3817a2ea9ea06fe30c8a85378caa30c99c3b
+- Contrato `C...` (SAC USDC canónico) verificado en vivo vía `Contract.getFootprint()` + Soroban RPC:
+  - `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA`
+  - Verlo: https://stellar.expert/explorer/testnet/contract/CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA
