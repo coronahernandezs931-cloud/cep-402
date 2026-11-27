@@ -8,14 +8,18 @@ import { Keypair, StrKey } from '@stellar/stellar-sdk';
 
 import {
   USDC_SAC_TESTNET,
+  createFailoverRpcClient,
   verifyOnChainSettlement,
   diagnoseSmartAccount,
   AtomicReplayStore,
   canonicalize,
   sha256Hex,
+  buildCadenaOriginal,
   buildAndSignReceipt,
   verifyReceiptOffline,
   verifyReceiptZeroTrust,
+  receiptToBanxicoXml,
+  receiptsToAccountingCsv,
   RavenKnowledgeProvider,
   startCep402Server,
 } from './index.js';
@@ -158,7 +162,7 @@ function createStubRpcServer(txMap = new Map()) {
   };
 }
 
-describe('CEP-402 v2 — 7 Invariantes Soroban RPC, Protocol 23/CAP-67 y Smart Accounts C...', () => {
+describe('CEP-402 v3 — 7 Invariantes Soroban RPC, Multi-RPC Failover, CAP-67 y Smart Accounts C...', () => {
   const txMap = new Map();
 
   txMap.set(VALID_TX_HASH, {
@@ -174,7 +178,6 @@ describe('CEP-402 v2 — 7 Invariantes Soroban RPC, Protocol 23/CAP-67 y Smart A
     ledger: 6000010,
     latestLedger: 6000012,
     envelopeXdr: makeEnvelopeJson(),
-    // Sin events.contractEventsXdr para ejercitar fallback resultMetaXdr V4 + CAP-67 map
     resultMetaXdr: { v4: { operations: [{ events: [makeContractEventJson({ cap67Map: true })] }] } },
   });
 
@@ -221,7 +224,7 @@ describe('CEP-402 v2 — 7 Invariantes Soroban RPC, Protocol 23/CAP-67 y Smart A
   txMap.set(EXPIRED_HASH, {
     status: 'SUCCESS',
     ledger: 5999000,
-    latestLedger: 6000000, // 1000 ledgers > 60
+    latestLedger: 6000000,
     envelopeXdr: makeEnvelopeJson(),
     events: { contractEventsXdr: [[makeContractEventJson()]] },
   });
@@ -331,10 +334,35 @@ describe('CEP-402 v2 — 7 Invariantes Soroban RPC, Protocol 23/CAP-67 y Smart A
     assert.equal(diag.existsOnTestnet, true);
     assert.equal(diag.wasmHash, 'ab'.repeat(32));
   });
+
+  it('9. Pool Multi-RPC rota automáticamente a RPC secundario cuando el primario falla', async () => {
+    // Levantamos un mini JSON-RPC local en puerto efímero como RPC #2 de respaldo
+    const http = await import('node:http');
+    const mockRpc2 = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { status: 'NOT_FOUND', latestLedger: 6000123 } }));
+    });
+    await new Promise((r) => mockRpc2.listen(0, '127.0.0.1', r));
+    const port2 = mockRpc2.address().port;
+
+    try {
+      const pool = createFailoverRpcClient([
+        'http://127.0.0.1:1', // Primario caído (ECONNREFUSED inmediato)
+        `http://127.0.0.1:${port2}`,
+      ]);
+      const tx = await pool.getTransaction(VALID_TX_HASH);
+      assert.equal(tx.status, 'NOT_FOUND');
+      assert.equal(pool.getStats().failoverCount, 1);
+      assert.equal(pool.getStats().lastEndpointUsed, `http://127.0.0.1:${port2}`);
+    } finally {
+      mockRpc2.closeAllConnections?.();
+      await new Promise((r) => mockRpc2.close(r));
+    }
+  });
 });
 
 describe('AtomicReplayStore — Anti-Replay 5x Paralelo + Persistencia NDJSON', () => {
-  it('9. Ante ráfaga 5x paralela, exactamente 1 adquiere el lock y 4 reciben REPLAY_IN_FLIGHT', async () => {
+  it('10. Ante ráfaga 5x paralela, exactamente 1 adquiere el lock y 4 reciben REPLAY_IN_FLIGHT', async () => {
     const store = new AtomicReplayStore({ inMemory: true });
     const results = await Promise.all(
       Array.from({ length: 5 }, () => Promise.resolve(store.tryAcquireSync(VALID_TX_HASH)))
@@ -346,18 +374,17 @@ describe('AtomicReplayStore — Anti-Replay 5x Paralelo + Persistencia NDJSON', 
     store.close();
   });
 
-  it('10. Sobrevive reinicio de proceso vía NDJSON fsync y releasePending nunca borra COMMITTED', () => {
+  it('11. Sobrevive reinicio de proceso vía NDJSON fsync y releasePending nunca borra COMMITTED', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cep402-test-'));
     const file = path.join(tmpDir, 'replay.ndjson');
     try {
       const store1 = new AtomicReplayStore({ filePath: file });
       assert.equal(store1.tryAcquireSync(VALID_TX_HASH).acquired, true);
       store1.commitSync(VALID_TX_HASH, { ledger: 6000000 });
-      store1.releasePending(VALID_TX_HASH); // No-op porque ya está COMMITTED
+      store1.releasePending(VALID_TX_HASH);
       assert.equal(store1.has(VALID_TX_HASH), true);
       store1.close();
 
-      // Simula reinicio completo de Node.js cargando el mismo NDJSON
       const store2 = new AtomicReplayStore({ filePath: file });
       const second = store2.tryAcquireSync(VALID_TX_HASH);
       assert.equal(second.acquired, false);
@@ -369,8 +396,22 @@ describe('AtomicReplayStore — Anti-Replay 5x Paralelo + Persistencia NDJSON', 
   });
 });
 
-describe('Recibo Canónico CEP-402 — Ed25519, Web Crypto SPKI y Detección de Tampering', () => {
-  it('11. Firma recibo Ed25519, verifica Zero-Trust y detecta alteración de 1 byte (TAMPERED)', async () => {
+describe('Recibo Canónico CEP-402 — Cadena Original Banxico, Ed25519, XML, CSV y Web Crypto', () => {
+  const sampleSettlement = {
+    txHash: VALID_TX_HASH,
+    ledger: 6000000,
+    assetContract: USDC_SAC_TESTNET,
+    amount: '100000',
+    amountUsdc: '0.01',
+    payer: PAYER_KP.publicKey(),
+    payerType: 'classic',
+    payTo: MERCHANT_KP.publicKey(),
+    feeSponsor: SPONSOR_KP.publicKey(),
+    isFeeBump: false,
+    stellarExpertUrl: `https://stellar.expert/explorer/testnet/tx/${VALID_TX_HASH}`,
+  };
+
+  it('12. Firma recibo Ed25519, verifica Zero-Trust y detecta alteración de 1 byte (TAMPERED)', async () => {
     const rawBody = Buffer.from(JSON.stringify({ dato: 'liquidez-ok', precio: 19.85 }), 'utf8');
     const txMap = new Map([
       [
@@ -385,50 +426,68 @@ describe('Recibo Canónico CEP-402 — Ed25519, Web Crypto SPKI y Detección de 
       ],
     ]);
     const rpcStub = createStubRpcServer(txMap);
-    const verified = await verifyOnChainSettlement(rpcStub, {
-      txHash: VALID_TX_HASH,
-      expectedPayTo: MERCHANT_KP.publicKey(),
-      expectedAmount: '100000',
-      pollDelaysMs: [0],
-    });
 
     const receipt = buildAndSignReceipt({
-      settlement: verified.settlement,
+      settlement: sampleSettlement,
       reqMeta: { method: 'GET', path: '/api/cep402/dato', querySha256: sha256Hex('') },
       resMeta: { status: 200, contentType: 'application/json', bodySha256: sha256Hex(rawBody) },
       merchantSecret: MERCHANT_KP.secret(),
     });
 
-    // Verificación Zero-Trust completa (offline + RPC)
     const zt = await verifyReceiptZeroTrust(rpcStub, receipt, rawBody, {
       pinnedMerchantPubKey: MERCHANT_KP.publicKey(),
     });
     assert.equal(zt.ok, true);
     assert.equal(zt.stage, 'verified_zero_trust');
 
-    // Alterar exactamente 1 byte del payload debe detonar BODY_HASH_MISMATCH
     const tampered = Buffer.from(rawBody.toString('utf8').replace('19.85', '19.86'), 'utf8');
     const bad = verifyReceiptOffline(receipt, tampered, MERCHANT_KP.publicKey());
     assert.equal(bad.ok, false);
     assert.equal(bad.code, 'BODY_HASH_MISMATCH');
   });
 
-  it('12. La llave SPKI del recibo verifica nativamente con Web Crypto subtle.verify("Ed25519")', async () => {
+  it('13. Genera Cadena Original ||...|| estilo Banxico y detecta manipulación CADENA_ORIGINAL_MISMATCH', () => {
     const rawBody = Buffer.from('{"ok":true}', 'utf8');
     const receipt = buildAndSignReceipt({
-      settlement: {
-        txHash: VALID_TX_HASH,
-        ledger: 6000000,
-        assetContract: USDC_SAC_TESTNET,
-        amount: '100000',
-        amountUsdc: '0.01',
-        payer: PAYER_KP.publicKey(),
-        payerType: 'classic',
-        payTo: MERCHANT_KP.publicKey(),
-        feeSponsor: SPONSOR_KP.publicKey(),
-        isFeeBump: false,
-        stellarExpertUrl: `https://stellar.expert/explorer/testnet/tx/${VALID_TX_HASH}`,
-      },
+      settlement: sampleSettlement,
+      reqMeta: { method: 'GET', path: '/api/cep402/dato', querySha256: sha256Hex('') },
+      resMeta: { status: 200, contentType: 'application/json', bodySha256: sha256Hex(rawBody) },
+      merchantSecret: MERCHANT_KP.secret(),
+    });
+    assert.ok(receipt.cadenaOriginal.startsWith('||2.0|CEP-402|'));
+    assert.ok(receipt.cadenaOriginal.endsWith('||'));
+    assert.equal(receipt.cadenaOriginal, buildCadenaOriginal(receipt.payload));
+
+    const mutated = { ...receipt, cadenaOriginal: receipt.cadenaOriginal.replace('CEP-402', 'FAKE') };
+    const check = verifyReceiptOffline(mutated, rawBody, MERCHANT_KP.publicKey());
+    assert.equal(check.ok, false);
+    assert.equal(check.code, 'CADENA_ORIGINAL_MISMATCH');
+  });
+
+  it('14. Exporta XML ComprobanteCEP402 y Póliza Contable CSV válidos para ERP', () => {
+    const rawBody = Buffer.from('{"ok":true}', 'utf8');
+    const receipt = buildAndSignReceipt({
+      settlement: sampleSettlement,
+      reqMeta: { method: 'GET', path: '/api/cep402/dato', querySha256: sha256Hex('') },
+      resMeta: { status: 200, contentType: 'application/json', bodySha256: sha256Hex(rawBody) },
+      merchantSecret: MERCHANT_KP.secret(),
+    });
+    const xml = receiptToBanxicoXml(receipt);
+    assert.match(xml, /<ComprobanteCEP402 /);
+    assert.match(xml, /<CadenaOriginal>\|\|2\.0\|CEP-402\|/);
+    assert.match(xml, /SelloDigital="/);
+
+    const csv = receiptsToAccountingCsv([receipt]);
+    const lines = csv.trim().split('\n');
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /^folio,issuedAt,txHash,/);
+    assert.match(lines[1], new RegExp(VALID_TX_HASH));
+  });
+
+  it('15. La llave SPKI del recibo verifica nativamente con Web Crypto subtle.verify("Ed25519")', async () => {
+    const rawBody = Buffer.from('{"ok":true}', 'utf8');
+    const receipt = buildAndSignReceipt({
+      settlement: sampleSettlement,
       reqMeta: { method: 'GET', path: '/api/cep402/dato', querySha256: sha256Hex('') },
       resMeta: { status: 200, contentType: 'application/json', bodySha256: sha256Hex(rawBody) },
       merchantSecret: MERCHANT_KP.secret(),
@@ -448,7 +507,7 @@ describe('Recibo Canónico CEP-402 — Ed25519, Web Crypto SPKI y Detección de 
   });
 });
 
-describe('Integración Express 5.3.0 Split-Screen (x402 Vanilla vs CEP-402 Guard)', () => {
+describe('Integración Express 5.3.0 Split-Screen, Well-Known, Auditor Público y Exportaciones', () => {
   let srv;
   let validSigHeader;
 
@@ -488,13 +547,23 @@ describe('Integración Express 5.3.0 Split-Screen (x402 Vanilla vs CEP-402 Guard
     await srv.close();
   });
 
-  it('13. Ruta protegida sin pago devuelve HTTP 402 con header PAYMENT-REQUIRED', async () => {
+  it('16. Publica /.well-known/cep402.json con merchantPublicKey, SPKI y SAC USDC canónico', async () => {
+    const res = await fetch(`${srv.url}/.well-known/cep402.json`);
+    assert.equal(res.status, 200);
+    const wk = await res.json();
+    assert.equal(wk.spec, 'CEP-402');
+    assert.equal(wk.merchantPublicKey, MERCHANT_KP.publicKey());
+    assert.equal(wk.canonicalUsdcSac, USDC_SAC_TESTNET);
+    assert.ok(wk.merchantSpkiBase64.length > 40);
+  });
+
+  it('17. Ruta protegida sin pago devuelve HTTP 402 con header PAYMENT-REQUIRED', async () => {
     const res = await fetch(`${srv.url}/api/cep402/dato`);
     assert.equal(res.status, 402);
     assert.ok(res.headers.get('payment-required'));
   });
 
-  it('14. Facilitador comprometido (FAKE_SETTLE): Vanilla saqueado 200 OK vs CEP-402 bloqueado 403', async () => {
+  it('18. Facilitador comprometido (FAKE_SETTLE): Vanilla saqueado 200 OK vs CEP-402 bloqueado 403', async () => {
     srv.facilitator.setMode('FAKE_SETTLE');
     const [vanilla, cep] = await Promise.all([
       fetch(`${srv.url}/api/vanilla/dato`, { headers: { 'PAYMENT-SIGNATURE': validSigHeader } }),
@@ -507,10 +576,9 @@ describe('Integración Express 5.3.0 Split-Screen (x402 Vanilla vs CEP-402 Guard
     assert.equal(cepErr.error, 'TX_NOT_FOUND_ON_CHAIN');
   });
 
-  it('15. Pago válido emite 200 + X-CEP402-Receipt íntegro y ráfaga 5x replay bloquea 5/5 con 409', async () => {
+  it('19. Pago válido emite 200 + recibo XML/CSV descargable y ráfaga 5x replay bloquea 5/5 con 409', async () => {
     srv.facilitator.setMode('REPLAY_OLD_TX', { lastRealTxHash: VALID_TX_HASH });
 
-    // 1er consumo válido -> 200 OK + recibo firmado sobre bytes exactos
     const first = await fetch(`${srv.url}/api/cep402/dato`, {
       headers: { 'PAYMENT-SIGNATURE': validSigHeader },
     });
@@ -520,6 +588,16 @@ describe('Integración Express 5.3.0 Split-Screen (x402 Vanilla vs CEP-402 Guard
     assert.ok(receiptB64);
     const receipt = JSON.parse(Buffer.from(receiptB64, 'base64url').toString('utf8'));
     assert.equal(verifyReceiptOffline(receipt, raw, MERCHANT_KP.publicKey()).ok, true);
+
+    // Exportación XML y Póliza CSV disponibles tras liquidar
+    const [xmlRes, csvRes] = await Promise.all([
+      fetch(`${srv.url}/api/last-receipt.xml`),
+      fetch(`${srv.url}/api/export/accounting.csv`),
+    ]);
+    assert.equal(xmlRes.status, 200);
+    assert.match(await xmlRes.text(), /<ComprobanteCEP402 /);
+    assert.equal(csvRes.status, 200);
+    assert.match(await csvRes.text(), new RegExp(VALID_TX_HASH));
 
     // 5x replay paralelo del mismo hash -> Vanilla entrega 5/5, CEP-402 bloquea 5/5 con 409
     const [vanillaBurst, cepBurst] = await Promise.all([
@@ -541,30 +619,69 @@ describe('Integración Express 5.3.0 Split-Screen (x402 Vanilla vs CEP-402 Guard
     assert.deepEqual(vanillaBurst, [200, 200, 200, 200, 200]);
     assert.deepEqual(cepBurst, [409, 409, 409, 409, 409]);
   });
+
+  it('20. Endpoint /api/audit-tx audita cualquier txHash público y rechaza hashes inexistentes', async () => {
+    const okRes = await fetch(`${srv.url}/api/audit-tx`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ txHash: VALID_TX_HASH }),
+    });
+    const okJson = await okRes.json();
+    assert.equal(okJson.ok, true);
+    assert.equal(okJson.settlement.amountUsdc, '0.01');
+    assert.ok(okJson.receipt?.payload?.folio?.startsWith('CEP402-'));
+
+    const badRes = await fetch(`${srv.url}/api/audit-tx`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ txHash: '99'.repeat(32) }),
+    });
+    const badJson = await badRes.json();
+    assert.equal(badJson.ok, false);
+    assert.equal(badJson.code, 'TX_NOT_FOUND_ON_CHAIN');
+    assert.ok(badJson.ravenDiagnostic);
+  });
 });
 
-describe('RavenKnowledgeProvider — Camino Rojo con Degradación Honesta', () => {
-  it('16. Degrada limpiamente a VERIFIED_SNAPSHOT ante timeout/401 y usa LIVE cuando responde MCP', async () => {
+describe('RavenKnowledgeProvider — MCP Streamable HTTP (Handshake + SSE + Fallback)', () => {
+  it('21. Degrada limpiamente a VERIFIED_SNAPSHOT ante 401 y soporta initialize + SSE text/event-stream', async () => {
     const failing = new RavenKnowledgeProvider({
       accessToken: 'fake-expired-token',
       fetchImpl: async () => ({ ok: false, status: 401, text: async () => 'Unauthorized' }),
     });
     const d1 = await failing.diagnose('SMART_ACCOUNT_POLICY_3221');
     assert.equal(d1.source, 'VERIFIED_SNAPSHOT');
-    assert.match(d1.badge, /VERIFIED SNAPSHOT/);
 
-    const live = new RavenKnowledgeProvider({
+    const calls = [];
+    const liveSse = new RavenKnowledgeProvider({
       accessToken: 'valid-token',
-      fetchImpl: async () => ({
-        ok: true,
-        status: 200,
-        text: async () =>
-          JSON.stringify({ result: { content: [{ text: 'OpenZeppelin SpendingLimitPolicy #3221 docs' }] } }),
-      }),
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(init.body);
+        calls.push({ method: body.method, sessionHeader: init.headers['Mcp-Session-Id'] || null });
+        if (body.method === 'initialize') {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Map([['mcp-session-id', 'sess-raven-402']]),
+            text: async () => JSON.stringify({ jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-03-26' } }),
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: new Map(),
+          text: async () =>
+            'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"content":[{"text":"Stellar Scout + OZ Smart Accounts #3221 verified via SSE"}]}}\n\n',
+        };
+      },
     });
-    const d2 = await live.diagnose('SMART_ACCOUNT_POLICY_3221');
+
+    const d2 = await liveSse.diagnose('SMART_ACCOUNT_POLICY_3221');
     assert.equal(d2.source, 'LIVE_RAVEN_MCP');
-    assert.equal(d2.badge, 'RAVEN MCP: LIVE');
-    assert.match(d2.liveExcerpt, /SpendingLimitPolicy/);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].method, 'initialize');
+    assert.equal(calls[1].method, 'tools/call');
+    assert.equal(calls[1].sessionHeader, 'sess-raven-402');
+    assert.match(d2.liveExcerpt, /verified via SSE/);
   });
 });

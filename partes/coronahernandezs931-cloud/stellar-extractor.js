@@ -7,6 +7,7 @@ import {
   Networks,
   StrKey,
   TransactionBuilder,
+  nativeToScVal,
   scValToNative,
 } from '@stellar/stellar-sdk';
 
@@ -17,6 +18,65 @@ export const STELLAR_EXPERT_TX_BASE = 'https://stellar.expert/explorer/testnet/t
 export const STELLAR_EXPERT_CONTRACT_BASE = 'https://stellar.expert/explorer/testnet/contract/';
 
 const POLL_DELAYS_MS = [0, 450, 750]; // hasta ~1.2s absorbiendo propagación RPC sin frenar la demo
+
+/**
+ * Pool Multi-RPC con failover automático ante caídas, timeouts o rate-limits (429/5xx).
+ * Si se inyecta un objeto RPC ya instanciado (como en tests unitarios), lo respeta directamente.
+ */
+export function createFailoverRpcClient(urlsOrServer) {
+  if (urlsOrServer && typeof urlsOrServer === 'object' && !Array.isArray(urlsOrServer)) {
+    return urlsOrServer;
+  }
+
+  const rawList = Array.isArray(urlsOrServer)
+    ? urlsOrServer
+    : String(urlsOrServer || process.env.SOROBAN_RPC_URLS || process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org')
+        .split(',')
+        .map((u) => u.trim())
+        .filter(Boolean);
+
+  const urls = rawList.length > 0 ? rawList : ['https://soroban-testnet.stellar.org'];
+  const servers = urls.map((url) => ({
+    url,
+    client: new rpc.Server(url, { allowHttp: url.startsWith('http://') }),
+  }));
+
+  const stats = {
+    urls,
+    activeIndex: 0,
+    failoverCount: 0,
+    lastEndpointUsed: urls[0],
+  };
+
+  const callWithFailover = async (method, ...args) => {
+    let lastErr;
+    for (let attempt = 0; attempt < servers.length; attempt++) {
+      const idx = (stats.activeIndex + attempt) % servers.length;
+      const entry = servers[idx];
+      try {
+        const res = await entry.client[method](...args);
+        if (attempt > 0) {
+          stats.activeIndex = idx;
+          stats.failoverCount += 1;
+        }
+        stats.lastEndpointUsed = entry.url;
+        return res;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr;
+  };
+
+  return {
+    getStats: () => ({ ...stats }),
+    getTransaction: (hash) => callWithFailover('getTransaction', hash),
+    getLedgerEntries: (...keys) => callWithFailover('getLedgerEntries', ...keys),
+    getAccount: (pubKey) => callWithFailover('getAccount', pubKey),
+    simulateTransaction: (tx) => callWithFailover('simulateTransaction', tx),
+    getLatestLedger: () => callWithFailover('getLatestLedger'),
+  };
+}
 
 /**
  * Normaliza XDR de `@stellar/stellar-sdk@17.4.0` (base64, instancia XDR v17 o JSON SEP-0050).
@@ -261,6 +321,7 @@ export async function verifyOnChainSettlement(
   invariants.txHashFormat = true;
 
   let tx;
+  const t0 = Date.now();
   for (const delay of pollDelaysMs) {
     if (delay > 0) await new Promise((r) => setTimeout(r, delay));
     try {
@@ -276,6 +337,7 @@ export async function verifyOnChainSettlement(
     }
     if (tx?.status !== rpc.Api.GetTransactionStatus.NOT_FOUND) break;
   }
+  const rpcLatencyMs = Date.now() - t0;
 
   if (!tx || tx.status === rpc.Api.GetTransactionStatus.NOT_FOUND) {
     return {
@@ -332,14 +394,15 @@ export async function verifyOnChainSettlement(
   }
   invariants.canonicalUsdcSac = true;
 
-  const incoming = transfers.filter((t) => t.to === expectedPayTo);
-  const outgoing = transfers.filter((t) => t.from === expectedPayTo);
+  const effectivePayTo = expectedPayTo || transfers[0].to;
+  const incoming = transfers.filter((t) => t.to === effectivePayTo);
+  const outgoing = transfers.filter((t) => t.from === effectivePayTo);
   if (incoming.length === 0) {
     return {
       ok: false,
       transient: false,
       code: 'WRONG_RECIPIENT',
-      detail: `Ninguna transferencia fue enviada al comercio ${expectedPayTo}.`,
+      detail: `Ninguna transferencia fue enviada al comercio ${effectivePayTo}.`,
       invariants,
     };
   }
@@ -371,6 +434,8 @@ export async function verifyOnChainSettlement(
   }
   invariants.payerSeparated = true;
 
+  const rpcStats = typeof rpcServer.getStats === 'function' ? rpcServer.getStats() : null;
+
   return {
     ok: true,
     invariants,
@@ -384,7 +449,7 @@ export async function verifyOnChainSettlement(
       amountUsdc: formatStroopsToUsdc(netToMerchant),
       payer: primary.from,
       payerType: primary.payerType,
-      payTo: expectedPayTo,
+      payTo: effectivePayTo,
       feeSponsor: envInfo.feeSponsor,
       txSource: envInfo.txSource,
       isFeeBump: envInfo.isFeeBump,
@@ -393,19 +458,27 @@ export async function verifyOnChainSettlement(
       cap67Wrapped: primary.cap67Wrapped,
       smartAccountAuth: envInfo.authEntries.filter((a) => a.isSmartAccount),
       allAuthEntries: envInfo.authEntries,
+      rpcEndpointUsed: rpcStats?.lastEndpointUsed ?? 'custom',
+      rpcLatencyMs,
       stellarExpertUrl: `${STELLAR_EXPERT_TX_BASE}${normalizedHash}`,
     },
   };
 }
 
 /**
- * Diagnóstico Forense CAP-46 / OpenZeppelin Smart Accounts (read-only real en Soroban RPC).
- * No inventa políticas: lee existencia, executable/wasmHash y balance USDC real del contrato C... en Testnet.
+ * Diagnóstico Forense CAP-46 / OpenZeppelin Smart Accounts (read-only + simulación auth en Soroban RPC).
+ * Lee existencia, executable/wasmHash, balance USDC y simula una invocación SAC `transfer(from=C...)`
+ * para extraer la traza real de `__check_auth` / `sorobanCredentialsAddress`.
  */
 export async function diagnoseSmartAccount(
   rpcServer,
   contractId,
-  { simulationSourcePublicKey = null, expectedAssetContract = USDC_SAC_TESTNET } = {}
+  {
+    simulationSourcePublicKey = null,
+    payTo = null,
+    simulatedAmountStroops = '100000',
+    expectedAssetContract = USDC_SAC_TESTNET,
+  } = {}
 ) {
   if (!StrKey.isValidContract(contractId)) {
     return {
@@ -444,7 +517,9 @@ export async function diagnoseSmartAccount(
 
   let usdcBalanceStroops = null;
   let usdcBalanceUsdc = null;
-  if (simulationSourcePublicKey && StrKey.isValidEd25519PublicKey(simulationSourcePublicKey)) {
+  let simulatedTransferAuth = null;
+
+  if (simulationSourcePublicKey && StrKey.isValidEd25519PublicKey(simulationSourcePublicKey) && typeof rpcServer.getAccount === 'function') {
     try {
       const sac = new Contract(expectedAssetContract);
       const sourceAcc = await rpcServer.getAccount(simulationSourcePublicKey);
@@ -461,8 +536,41 @@ export async function diagnoseSmartAccount(
         usdcBalanceStroops = String(val);
         usdcBalanceUsdc = formatStroopsToUsdc(val);
       }
+
+      // Simulación real de `USDC_SAC.transfer(from=C..., to=payTo, amount)` para demostrar CAP-46 __check_auth
+      const recipientAddr = payTo && StrKey.isValidEd25519PublicKey(payTo) ? payTo : simulationSourcePublicKey;
+      const sourceAcc2 = await rpcServer.getAccount(simulationSourcePublicKey);
+      const transferTx = new TransactionBuilder(sourceAcc2, {
+        fee: '100',
+        networkPassphrase: Networks.TESTNET,
+      })
+        .addOperation(
+          sac.call(
+            'transfer',
+            new Address(contractId).toScVal(),
+            new Address(recipientAddr).toScVal(),
+            nativeToScVal(BigInt(simulatedAmountStroops), { type: 'i128' })
+          )
+        )
+        .setTimeout(30)
+        .build();
+      const transferSim = await rpcServer.simulateTransaction(transferTx);
+      if (transferSim?.error) {
+        simulatedTransferAuth = {
+          outcome: 'HOST_REJECTED_OR_ZERO_BALANCE',
+          hostError: String(transferSim.error).slice(0, 240),
+          requiresContractCheckAuth: true,
+        };
+      } else if (transferSim?.result?.auth) {
+        const authJson = toXdrJson(transferSim.result.auth, xdr.SorobanAuthorizationEntry);
+        simulatedTransferAuth = {
+          outcome: 'AUTH_ENTRY_REQUIRED',
+          authEntriesCount: Array.isArray(authJson) ? authJson.length : 1,
+          requiresContractCheckAuth: true,
+        };
+      }
     } catch {
-      // Simulación de balance es best-effort si la cuenta fuente no existe o no soporta balance
+      // Simulación best-effort si se corre en modo offline
     }
   }
 
@@ -475,6 +583,7 @@ export async function diagnoseSmartAccount(
     wasmHash,
     usdcBalanceStroops,
     usdcBalanceUsdc,
+    simulatedTransferAuth,
     stellarExpertUrl: `${STELLAR_EXPERT_CONTRACT_BASE}${contractId}`,
     cap46AndOzAnalysis: {
       cannotBeEnvelopeSource: true,

@@ -1,17 +1,17 @@
 /**
- * RavenKnowledgeProvider — Auditor Forense del Camino Rojo (CEP-402 v2)
+ * RavenKnowledgeProvider — Auditor Forense del Camino Rojo (CEP-402 v3)
  *
  * Regla arquitectónica Zero-Trust:
  * - El middleware Express de producción JAMÁS depende de Raven MCP ni de IA.
  * - Raven MCP (`https://raven.stellar.org/mcp`) corre exclusivamente en el
  *   Auditor del Camino Rojo para explicar bloqueos Soroban / SAC / OpenZeppelin Smart Accounts.
- * - Soporta modo LIVE (cuando hay sesión OAuth WorkOS en RAVEN_ACCESS_TOKEN)
- *   y degrada de forma explícita y honesta a VERIFIED SNAPSHOT para que `npm test`
- *   termine siempre en `# fail 0` sin depender de navegador/login interactivo.
+ * - Implementa el handshake completo MCP Streamable HTTP (`initialize` -> `Mcp-Session-Id` -> `tools/call`
+ *   con soporte JSON y Server-Sent Events `text/event-stream`), y degrada con honestidad a
+ *   VERIFIED SNAPSHOT cuando no hay sesión OAuth interactiva para garantizar `# fail 0` en CI/Codespaces.
  */
 
 export const RAVEN_MCP_URL = 'https://raven.stellar.org/mcp';
-export const SNAPSHOT_CAPTURED_AT = '2026-11-24T19:30:00Z';
+export const SNAPSHOT_CAPTURED_AT = '2026-11-26T18:00:00Z';
 
 const VERIFIED_KNOWLEDGE = {
   TX_NOT_FOUND_ON_CHAIN: {
@@ -74,8 +74,17 @@ const VERIFIED_KNOWLEDGE = {
     cause:
       'El SHA-256 de los bytes crudos recibidos no coincide con response.bodySha256 sellado en el recibo Ed25519 CEP-402.',
     remediation:
-      'Rechazar la respuesta por violación de integridad y conservar el recibo CEP-402 firmado como evidencia de no-repudio.',
+      'Rechazar la respuesta por violación de integridad y conservar el recibo CEP-402 (Cadena Original + Sello Ed25519) como evidencia de no-repudio.',
     stellarRef: 'https://developers.stellar.org/docs/learn/encyclopedia/security/cryptography',
+  },
+  CADENA_ORIGINAL_MISMATCH: {
+    severity: 'CRITICAL',
+    title: 'Cadena Original Manipulada en Comprobante CEP-402',
+    cause:
+      'La secuencia delimitada ||...|| de la Cadena Original no coincide con los atributos del payload firmado.',
+    remediation:
+      'Reconstruir determinísticamente buildCadenaOriginal(payload) antes de validar el Sello Digital Ed25519.',
+    stellarRef: 'https://www.banxico.org.mx/cep/',
   },
   SMART_ACCOUNT_POLICY_3221: {
     severity: 'HIGH',
@@ -87,6 +96,31 @@ const VERIFIED_KNOWLEDGE = {
     stellarRef: 'https://docs.openzeppelin.com/stellar-contracts/accounts/smart-account',
   },
 };
+
+function parseJsonOrSse(rawText) {
+  const trimmed = rawText.trim();
+  if (!trimmed) return null;
+  // Soporte SSE (`event: message\ndata: {...}`) del estándar MCP Streamable HTTP
+  if (trimmed.includes('data:')) {
+    const dataLines = trimmed
+      .split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trim())
+      .filter(Boolean);
+    for (let i = dataLines.length - 1; i >= 0; i--) {
+      try {
+        return JSON.parse(dataLines[i]);
+      } catch {
+        // continuar buscando el último evento JSON válido
+      }
+    }
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
 
 export class RavenKnowledgeProvider {
   constructor({
@@ -102,6 +136,7 @@ export class RavenKnowledgeProvider {
     this.fetchImpl = fetchImpl;
     this.mode = mode;
     this._cooldownUntil = 0;
+    this._sessionId = null;
   }
 
   async diagnose(errorCode, context = {}) {
@@ -131,6 +166,7 @@ export class RavenKnowledgeProvider {
       } catch {
         // Circuit-breaker de 5 min si WorkOS OAuth devuelve 401/timeout
         this._cooldownUntil = Date.now() + 5 * 60 * 1000;
+        this._sessionId = null;
       }
     }
 
@@ -140,25 +176,61 @@ export class RavenKnowledgeProvider {
       mcpEndpoint: this.mcpUrl,
       oauthNote: this.accessToken
         ? 'Fallback automático por timeout/OAuth de Raven MCP.'
-        : 'Sin RAVEN_ACCESS_TOKEN en .env — usando snapshot verificado de Raven MCP (conecta https://raven.stellar.org/mcp vía mcp.json para modo live).',
+        : 'Sin RAVEN_ACCESS_TOKEN en .env — usando snapshot verificado de Raven MCP (conecta https://raven.stellar.org/mcp vía .mcp.json para modo live).',
       errorCode: normalizedCode,
       ...snapshot,
       evaluatedAt: new Date().toISOString(),
     };
   }
 
+  async _sendMcpRpc(bodyObj, signal) {
+    const headers = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      Authorization: `Bearer ${this.accessToken}`,
+    };
+    if (this._sessionId) headers['Mcp-Session-Id'] = this._sessionId;
+
+    const res = await this.fetchImpl(this.mcpUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(bodyObj),
+      signal,
+    });
+    if (!res.ok) throw new Error(`Raven MCP HTTP ${res.status}`);
+    const sid = res.headers?.get?.('mcp-session-id');
+    if (sid) this._sessionId = sid;
+    const text = await res.text();
+    return parseJsonOrSse(text);
+  }
+
   async _queryLiveMcp(query) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const res = await this.fetchImpl(this.mcpUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json, text/event-stream',
-          Authorization: `Bearer ${this.accessToken}`,
-        },
-        body: JSON.stringify({
+      // Handshake Streamable HTTP MCP 2025-03-26 si aún no hay sesión activa
+      if (!this._sessionId) {
+        try {
+          await this._sendMcpRpc(
+            {
+              jsonrpc: '2.0',
+              id: 0,
+              method: 'initialize',
+              params: {
+                protocolVersion: '2025-03-26',
+                capabilities: {},
+                clientInfo: { name: 'cep-402-auditor', version: '3.0.0' },
+              },
+            },
+            controller.signal
+          );
+        } catch {
+          // Algunos servidores stateless permiten tools/call directo; continuamos
+        }
+      }
+
+      const parsed = await this._sendMcpRpc(
+        {
           jsonrpc: '2.0',
           id: 1,
           method: 'tools/call',
@@ -166,20 +238,14 @@ export class RavenKnowledgeProvider {
             name: 'search',
             arguments: { query },
           },
-        }),
-        signal: controller.signal,
-      });
+        },
+        controller.signal
+      );
 
-      if (!res.ok) throw new Error(`Raven MCP HTTP ${res.status}`);
-      const text = await res.text();
-      if (!text.trim()) return null;
-      try {
-        const parsed = JSON.parse(text);
-        const content = parsed?.result?.content?.[0]?.text;
-        return typeof content === 'string' ? content.slice(0, 420) : text.slice(0, 420);
-      } catch {
-        return text.slice(0, 420);
-      }
+      if (!parsed) return null;
+      if (typeof parsed === 'string') return parsed.slice(0, 420);
+      const content = parsed?.result?.content?.[0]?.text;
+      return typeof content === 'string' ? content.slice(0, 420) : JSON.stringify(parsed).slice(0, 420);
     } finally {
       clearTimeout(timer);
     }

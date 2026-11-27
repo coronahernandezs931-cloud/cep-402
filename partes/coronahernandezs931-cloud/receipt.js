@@ -46,6 +46,34 @@ export function stellarPublicKeyToSpkiBase64(stellarPublicKey) {
   return Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(rawPub)]).toString('base64');
 }
 
+/**
+ * Genera la Cadena Original determinista estilo CEP de Banxico delimitada por `||`.
+ */
+export function buildCadenaOriginal(payload) {
+  const fields = [
+    payload.version ?? '2.0',
+    payload.cep ?? 'CEP-402',
+    payload.network ?? '',
+    payload.folio ?? '',
+    payload.issuedAt ?? '',
+    payload.txHash ?? '',
+    String(payload.ledger ?? ''),
+    payload.assetContract ?? '',
+    payload.payer ?? '',
+    payload.payerType ?? '',
+    payload.payTo ?? '',
+    payload.feeSponsor ?? '',
+    String(payload.amount ?? ''),
+    payload.request?.method ?? '',
+    payload.request?.path ?? '',
+    payload.request?.querySha256 ?? '',
+    String(payload.response?.status ?? ''),
+    payload.response?.bodySha256 ?? '',
+    payload.merchantPubKey ?? '',
+  ];
+  return `||${fields.join('|')}||`;
+}
+
 export function buildAndSignReceipt({
   settlement,
   reqMeta,
@@ -86,9 +114,10 @@ export function buildAndSignReceipt({
     version: '2.0',
   };
 
+  const cadenaOriginal = buildCadenaOriginal(payload);
   const canonicalJson = canonicalize(payload);
   const signature = Buffer.from(kp.sign(Buffer.from(canonicalJson, 'utf8'))).toString('base64');
-  return { alg: 'Ed25519', payload, signature };
+  return { alg: 'Ed25519', cadenaOriginal, payload, signature };
 }
 
 export function verifyReceiptOffline(envelope, rawResponseBytes = null, pinnedMerchantPubKey = null) {
@@ -106,6 +135,17 @@ export function verifyReceiptOffline(envelope, rawResponseBytes = null, pinnedMe
   }
   if (!StrKey.isValidEd25519PublicKey(payload.merchantPubKey)) {
     return { ok: false, code: 'INVALID_MERCHANT_PUBKEY', detail: 'Llave pública Stellar inválida.' };
+  }
+
+  const expectedCadena = buildCadenaOriginal(payload);
+  if (envelope.cadenaOriginal && envelope.cadenaOriginal !== expectedCadena) {
+    return {
+      ok: false,
+      code: 'CADENA_ORIGINAL_MISMATCH',
+      detail: 'La Cadena Original del comprobante no coincide con los campos del payload.',
+      expected: expectedCadena,
+      actual: envelope.cadenaOriginal,
+    };
   }
 
   if (rawResponseBytes != null) {
@@ -139,7 +179,7 @@ export function verifyReceiptOffline(envelope, rawResponseBytes = null, pinnedMe
     };
   }
 
-  return { ok: true, canonicalJson, folio: payload.folio };
+  return { ok: true, canonicalJson, cadenaOriginal: expectedCadena, folio: payload.folio };
 }
 
 export async function verifyReceiptZeroTrust(rpcServer, envelope, rawResponseBytes = null, opts = {}) {
@@ -171,4 +211,90 @@ export async function verifyReceiptZeroTrust(rpcServer, envelope, rawResponseByt
   }
 
   return { ok: true, stage: 'verified_zero_trust', onChain: s, receipt: p };
+}
+
+function escapeXml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/**
+ * Exporta un recibo CEP-402 al formato XML estructurado estilo CEP de Banxico / ERP.
+ */
+export function receiptToBanxicoXml(envelope) {
+  const p = envelope.payload;
+  const cadena = envelope.cadenaOriginal || buildCadenaOriginal(p);
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<ComprobanteCEP402 Version="${escapeXml(p.version)}" Folio="${escapeXml(p.folio)}" FechaOperacion="${escapeXml(p.issuedAt)}" ClaveRastreo="${escapeXml(p.txHash)}" Ledger="${escapeXml(p.ledger)}" Red="${escapeXml(p.network)}" MontoUSDC="${escapeXml(p.amountUsdc)}" MontoStroops="${escapeXml(p.amount)}" AlgoritmoFirma="Ed25519" NoCertificado="${escapeXml(p.merchantPubKey)}" SelloDigital="${escapeXml(envelope.signature)}">`,
+    `  <ActivoSAC ContractId="${escapeXml(p.assetContract)}" Simbolo="USDC" Decimales="7" />`,
+    `  <Ordenante Cuenta="${escapeXml(p.payer)}" TipoCuenta="${escapeXml(p.payerType)}" />`,
+    `  <PatrocinadorGas Cuenta="${escapeXml(p.feeSponsor)}" EsFeeBump="${escapeXml(p.isFeeBump)}" />`,
+    `  <Beneficiario Cuenta="${escapeXml(p.payTo)}" SpkiBase64="${escapeXml(p.merchantSpkiBase64)}" />`,
+    `  <RecursoHTTP Metodo="${escapeXml(p.request?.method)}" Ruta="${escapeXml(p.request?.path)}" QuerySha256="${escapeXml(p.request?.querySha256)}" Status="${escapeXml(p.response?.status)}" BodySha256="${escapeXml(p.response?.bodySha256)}" />`,
+    `  <CadenaOriginal>${escapeXml(cadena)}</CadenaOriginal>`,
+    `  <EvidenciaPublica Url="${escapeXml(p.stellarExpertUrl)}" />`,
+    '</ComprobanteCEP402>',
+  ].join('\n');
+}
+
+function escapeCsvCell(val) {
+  const str = String(val ?? '');
+  return /[",\n\r]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+}
+
+/**
+ * Consolida recibos CEP-402 verificados en una Póliza Contable CSV para ERPs / contabilidad.
+ */
+export function receiptsToAccountingCsv(envelopes = []) {
+  const headers = [
+    'folio',
+    'issuedAt',
+    'txHash',
+    'ledger',
+    'network',
+    'payer',
+    'payerType',
+    'feeSponsor',
+    'payTo',
+    'amountUsdc',
+    'amountStroops',
+    'assetContract',
+    'httpMethod',
+    'httpPath',
+    'bodySha256',
+    'merchantPubKey',
+    'signatureEd25519',
+    'stellarExpertUrl',
+  ];
+  const rows = envelopes.map((env) => {
+    const p = env.payload || {};
+    return [
+      p.folio,
+      p.issuedAt,
+      p.txHash,
+      p.ledger,
+      p.network,
+      p.payer,
+      p.payerType,
+      p.feeSponsor,
+      p.payTo,
+      p.amountUsdc,
+      p.amount,
+      p.assetContract,
+      p.request?.method,
+      p.request?.path,
+      p.response?.bodySha256,
+      p.merchantPubKey,
+      env.signature,
+      p.stellarExpertUrl,
+    ]
+      .map(escapeCsvCell)
+      .join(',');
+  });
+  return [headers.join(','), ...rows].join('\n') + '\n';
 }

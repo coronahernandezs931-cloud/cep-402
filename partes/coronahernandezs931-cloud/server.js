@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import { Keypair, rpc } from '@stellar/stellar-sdk';
+import { Keypair } from '@stellar/stellar-sdk';
 import { paymentMiddleware, x402ResourceServer } from '@x402/express';
 import { ExactStellarScheme as ExactStellarServerScheme } from '@x402/stellar/exact/server';
 import { ExactStellarScheme as ExactStellarClientScheme } from '@x402/stellar/exact/client';
@@ -10,13 +10,15 @@ import { x402Client, wrapFetchWithPayment } from '@x402/fetch';
 
 import {
   USDC_SAC_TESTNET,
-  STELLAR_EXPERT_TX_BASE,
+  createFailoverRpcClient,
   diagnoseSmartAccount,
   verifyOnChainSettlement,
 } from './stellar-extractor.js';
 import { AtomicReplayStore } from './replay-store.js';
 import {
-  canonicalize,
+  buildAndSignReceipt,
+  receiptToBanxicoXml,
+  receiptsToAccountingCsv,
   sha256Hex,
   stellarPublicKeyToSpkiBase64,
   verifyReceiptOffline,
@@ -61,7 +63,7 @@ export async function createCep402App({
   merchantPublic = process.env.MI_PUBLICA,
   payerSecret = process.env.PAYER_SECRETA || process.env.AMIGO_SECRETA,
   facilitatorSecret = process.env.FACILITATOR_SECRETA || process.env.AGENTE_SECRETA,
-  rpcUrl = process.env.SOROBAN_RPC_URL || DEFAULT_RPC_URL,
+  rpcUrl = process.env.SOROBAN_RPC_URLS || process.env.SOROBAN_RPC_URL || DEFAULT_RPC_URL,
   rpcServer = null,
   replayStore = null,
   replayFilePath = null,
@@ -79,8 +81,9 @@ export async function createCep402App({
     : Keypair.fromRawEd25519Seed(Buffer.alloc(32, 7));
   const payTo = merchantPublic || merchantKp.publicKey();
   const effectiveMerchantSecret = merchantKp.secret();
+  const primaryRpcUrl = String(rpcUrl).split(',')[0].trim() || DEFAULT_RPC_URL;
 
-  const effectiveRpc = rpcServer || new rpc.Server(rpcUrl);
+  const effectiveRpc = rpcServer || createFailoverRpcClient(rpcUrl);
   const store =
     replayStore ||
     new AtomicReplayStore({
@@ -92,7 +95,7 @@ export async function createCep402App({
     facilitatorClient ||
     new DualFacilitatorClient({
       facilitatorSecret: facilitatorSecret || null,
-      rpcUrl,
+      rpcUrl: primaryRpcUrl,
       network: NETWORK,
     });
 
@@ -106,6 +109,7 @@ export async function createCep402App({
     cep402UsdcLost: '0.00',
     lastReceipt: null,
     lastRawBody: null,
+    verifiedReceiptsHistory: [],
     recentAuditEvents: [],
   };
 
@@ -142,10 +146,29 @@ export async function createCep402App({
   app.set('etag', false);
   app.use(express.json({ limit: '1mb' }));
 
-  // Anti-caché estricto para /api/* (evita 304 que rompería bodySha256)
+  // Anti-caché estricto para /api/* y /.well-known/* (evita 304 que rompería bodySha256)
   app.use('/api', (_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     next();
+  });
+
+  // --- Documento público de descubrimiento de llaves (estilo JWKS / SEP-1) ---
+  app.get('/.well-known/cep402.json', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      spec: 'CEP-402',
+      version: '2.0',
+      alg: 'Ed25519',
+      network: NETWORK,
+      canonicalUsdcSac: USDC_SAC_TESTNET,
+      merchantPublicKey: payTo,
+      merchantSpkiBase64: stellarPublicKeyToSpkiBase64(payTo),
+      verificationEndpoints: {
+        sorobanPublicRpc: primaryRpcUrl,
+        verifyReceipt: '/api/verify-receipt',
+        auditTransaction: '/api/audit-tx',
+      },
+    });
   });
 
   // --- Facilitador HTTP estándar (mismo origen) ---
@@ -191,6 +214,10 @@ export async function createCep402App({
       onReceiptIssued: (envelope, rawBody) => {
         metrics.lastReceipt = envelope;
         metrics.lastRawBody = rawBody.toString('utf8');
+        metrics.verifiedReceiptsHistory.unshift(envelope);
+        if (metrics.verifiedReceiptsHistory.length > 200) {
+          metrics.verifiedReceiptsHistory.pop();
+        }
       },
     })
   );
@@ -217,16 +244,18 @@ export async function createCep402App({
     });
   });
 
-  // --- Endpoints de Administración, Diagnóstico y Demo Day ---
+  // --- Endpoints de Administración, Exportación Contable, Diagnóstico y Demo Day ---
   app.get('/api/health', (_req, res) => {
     const payerPub = payerSecret ? Keypair.fromSecret(payerSecret).publicKey() : null;
     const facPub = facilitatorSecret ? Keypair.fromSecret(facilitatorSecret).publicKey() : null;
+    const rpcPool = typeof effectiveRpc.getStats === 'function' ? effectiveRpc.getStats() : { urls: [primaryRpcUrl], failoverCount: 0, lastEndpointUsed: primaryRpcUrl };
     res.json({
       ok: true,
-      project: 'CEP-402 v2',
+      project: 'CEP-402 v3',
       track: 'Verificación de pagos',
       network: NETWORK,
-      rpcUrl,
+      rpcUrl: primaryRpcUrl,
+      rpcPool,
       usdcSacTestnet: USDC_SAC_TESTNET,
       merchantPublicKey: payTo,
       merchantSpkiBase64: stellarPublicKeyToSpkiBase64(payTo),
@@ -243,6 +272,7 @@ export async function createCep402App({
         vanillaHacksSuffered: metrics.vanillaHacksSuffered,
         cep402UsdcLost: metrics.cep402UsdcLost,
         hasLastReceipt: Boolean(metrics.lastReceipt),
+        accountingRecordsCount: metrics.verifiedReceiptsHistory.length,
       },
     });
   });
@@ -276,14 +306,35 @@ export async function createCep402App({
     });
   });
 
+  app.get('/api/last-receipt.xml', (_req, res) => {
+    if (!metrics.lastReceipt) {
+      return res.status(404).json({ ok: false, error: 'Aún no se ha emitido ningún recibo CEP-402.' });
+    }
+    const xml = receiptToBanxicoXml(metrics.lastReceipt);
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${metrics.lastReceipt.payload.folio}.cep402.xml"`
+    );
+    res.send(xml);
+  });
+
+  app.get('/api/export/accounting.csv', (_req, res) => {
+    const csv = receiptsToAccountingCsv(metrics.verifiedReceiptsHistory);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="poliza-cep402.csv"');
+    res.send(csv);
+  });
+
   app.post('/api/verify-receipt', async (req, res) => {
     try {
-      const { receipt, rawBody, offlineOnly = false } = req.body ?? {};
+      const { receipt, rawBody, offlineOnly = false, pinMerchant = true } = req.body ?? {};
       const rawBuf = typeof rawBody === 'string' ? Buffer.from(rawBody, 'utf8') : null;
+      const pinned = pinMerchant ? payTo : null;
       const result = offlineOnly
-        ? verifyReceiptOffline(receipt, rawBuf, payTo)
+        ? verifyReceiptOffline(receipt, rawBuf, pinned)
         : await verifyReceiptZeroTrust(effectiveRpc, receipt, rawBuf, {
-            pinnedMerchantPubKey: payTo,
+            pinnedMerchantPubKey: pinned,
             expectedAssetContract: USDC_SAC_TESTNET,
           });
       const ravenDiag = result.ok ? null : await raven.diagnose(result.code, { detail: result.detail });
@@ -293,11 +344,61 @@ export async function createCep402App({
     }
   });
 
+  // --- Auditor Público de cualquier txHash en Stellar Testnet (emite Comprobante CEP-402 verificable) ---
+  app.post('/api/audit-tx', async (req, res) => {
+    const { txHash, expectedPayTo = null, expectedAmount = '100000' } = req.body ?? {};
+    const result = await verifyOnChainSettlement(effectiveRpc, {
+      txHash,
+      expectedPayTo,
+      expectedAmount,
+      expectedAssetContract: USDC_SAC_TESTNET,
+      maxLedgerAge: null, // Permite auditar transacciones históricas públicas
+    });
+    if (!result.ok) {
+      const ravenDiag = await raven.diagnose(result.code, { detail: result.detail });
+      return res.json({ ...result, ravenDiagnostic: ravenDiag });
+    }
+
+    let receipt = metrics.verifiedReceiptsHistory.find((r) => r.payload.txHash === result.settlement.txHash);
+    let rawBody = null;
+    if (!receipt) {
+      rawBody = JSON.stringify({
+        auditadoPor: 'CEP-402 Validador Público Soroban RPC',
+        txHash: result.settlement.txHash,
+        ledger: result.settlement.ledger,
+        amountUsdc: result.settlement.amountUsdc,
+        payTo: result.settlement.payTo,
+      });
+      receipt = buildAndSignReceipt({
+        settlement: result.settlement,
+        reqMeta: { method: 'POST', path: '/api/audit-tx', querySha256: sha256Hex('') },
+        resMeta: {
+          status: 200,
+          contentType: 'application/json',
+          bodySha256: sha256Hex(rawBody),
+        },
+        merchantSecret: effectiveMerchantSecret,
+        network: NETWORK,
+      });
+      metrics.verifiedReceiptsHistory.unshift(receipt);
+      if (metrics.verifiedReceiptsHistory.length > 200) {
+        metrics.verifiedReceiptsHistory.pop();
+      }
+      metrics.lastRawBody = rawBody;
+    } else if (receipt.payload.request?.path === '/api/cep402/dato') {
+      rawBody = metrics.lastRawBody;
+    }
+    metrics.lastReceipt = receipt;
+
+    res.json({ ...result, receipt, rawBody, ravenDiagnostic: null });
+  });
+
   app.post('/api/smart-account/diagnose', async (req, res) => {
-    const target = req.body?.contractId || smartAccountTarget;
+    const target = String(req.body?.contractId || smartAccountTarget).trim();
     const facPub = facilitatorSecret ? Keypair.fromSecret(facilitatorSecret).publicKey() : payTo;
     const diagnosis = await diagnoseSmartAccount(effectiveRpc, target, {
       simulationSourcePublicKey: facPub,
+      payTo,
       expectedAssetContract: USDC_SAC_TESTNET,
     });
     const ravenDiag = await raven.diagnose('SMART_ACCOUNT_POLICY_3221', {
@@ -312,7 +413,6 @@ export async function createCep402App({
     res.json({ ok: true, diagnostic: diag });
   });
 
-  // Helper interno: obtiene la URL base propia del servidor Express escuchando
   const getBaseUrl = (req) => `${req.protocol}://${req.get('host')}`;
 
   // --- Acción Demo 1: Duelo Split-Screen con Simulador de Facilitador Comprometido ---
@@ -323,7 +423,6 @@ export async function createCep402App({
     try {
       facilitator.setMode(mode);
 
-      // Obtenemos el PaymentRequirements real del 402 para armar el header
       const probe = await fetch(`${baseUrl}/api/cep402/dato`);
       const reqHeader = probe.headers.get('payment-required');
       const parsedReq = reqHeader ? JSON.parse(Buffer.from(reqHeader, 'base64').toString('utf8')) : null;
@@ -381,7 +480,7 @@ export async function createCep402App({
         facilitator.setMode('HONEST');
         const signer = createEd25519Signer(payerSecret, NETWORK);
         const client = x402Client.fromConfig({
-          schemes: [{ network: 'stellar:*', client: new ExactStellarClientScheme(signer, { url: rpcUrl }) }],
+          schemes: [{ network: 'stellar:*', client: new ExactStellarClientScheme(signer, { url: primaryRpcUrl }) }],
           spendControls: { maxAmountPerPayment: '$0.05' },
         });
         const fetchWithPay = wrapFetchWithPayment(fetch, client);
@@ -486,6 +585,7 @@ export async function createCep402App({
       const facPub = facilitatorSecret ? Keypair.fromSecret(facilitatorSecret).publicKey() : payTo;
       const smartDiag = await diagnoseSmartAccount(effectiveRpc, smartAccountTarget, {
         simulationSourcePublicKey: facPub,
+        payTo,
       });
       const ravenDiag = await raven.diagnose('SMART_ACCOUNT_POLICY_3221', {
         detail: `gauntlet replay=${replayTxHash.slice(0, 12)} fake=${fakeCepBody.error}`,
@@ -561,10 +661,12 @@ export async function startCep402Server(options = {}) {
 // Arranque directo desde CLI: `npm start` o `node --env-file-if-exists=.env partes/.../server.js`
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const srv = await startCep402Server();
-  console.log(`\n🛡️  CEP-402 v2 listo en ${srv.url}`);
+  console.log(`\n🛡️  CEP-402 v3 listo en ${srv.url}`);
   console.log(`   • UI Split-Screen:       ${srv.url}/`);
+  console.log(`   • Descubrimiento llaves: ${srv.url}/.well-known/cep402.json`);
   console.log(`   • x402 Vanilla:          ${srv.url}/api/vanilla/dato`);
   console.log(`   • CEP-402 Protegido:     ${srv.url}/api/cep402/dato`);
+  console.log(`   • Póliza Contable CSV:   ${srv.url}/api/export/accounting.csv`);
   console.log(`   • Facilitador Dual x402: ${srv.url}/facilitator/supported`);
   console.log(`   • Comercio (PAY_TO):     ${srv.merchantPublicKey}`);
   console.log(`   • SAC USDC Testnet:      ${USDC_SAC_TESTNET}\n`);

@@ -4,6 +4,7 @@ export {
   DEFAULT_MAX_LEDGER_AGE,
   STELLAR_EXPERT_TX_BASE,
   STELLAR_EXPERT_CONTRACT_BASE,
+  createFailoverRpcClient,
   toXdrJson,
   normalizeStellarAccountAddress,
   inspectSorobanAuthEntries,
@@ -22,9 +23,12 @@ export {
   canonicalize,
   sha256Hex,
   stellarPublicKeyToSpkiBase64,
+  buildCadenaOriginal,
   buildAndSignReceipt,
   verifyReceiptOffline,
   verifyReceiptZeroTrust,
+  receiptToBanxicoXml,
+  receiptsToAccountingCsv,
 } from './receipt.js';
 
 export {

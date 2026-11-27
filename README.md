@@ -6,7 +6,7 @@ Middleware Zero-Trust y Comprobante Electrónico de Pago criptográfico (estilo 
 
 ## Qué resuelve
 
-En México nadie entrega mercancía por una captura de pantalla de SPEI: todos exigen el **CEP de Banxico**. Hoy en el protocolo `x402`, las APIs confían ciegamente en el recibo devuelto por un facilitador. **CEP-402** agrega una capa de verificación independiente en 1 línea (`app.use(createCep402Gate(...))`) que audita **7 invariantes directamente contra Soroban RPC** antes de liberar el recurso:
+En México nadie entrega mercancía por una captura de pantalla de SPEI: todos exigen el **CEP de Banxico**. Hoy en el protocolo `x402`, las APIs confían ciegamente en el recibo devuelto por un facilitador. **CEP-402** agrega una capa de verificación independiente en 1 línea (`app.use(createCep402Gate(...))`) que audita **7 invariantes directamente contra Soroban RPC** (con **Pool Multi-RPC y failover automático**) antes de liberar el recurso:
 
 1. **Lock Anti-Replay atómico (409 Conflict):** bloquea síncronamente ráfagas paralelas (5× `Promise.all`) y persiste hashes en NDJSON (`fsyncSync`).
 2. **Confirmación on-chain (`SUCCESS`):** polling acotado en `rpc.Server.getTransaction(txHash)`.
@@ -16,14 +16,14 @@ En México nadie entrega mercancía por una captura de pantalla de SPEI: todos e
 6. **Monto neto exacto y destinatario en `BigInt` stroops** (7 decimales en Stellar).
 7. **Separación `Fee Sponsor (G...)` vs `Real Payer (G... o C...)`:** extrae `SorobanAuthorizationEntry` para soportar cuentas clásicas y **OpenZeppelin Smart Accounts (`C...`)**.
 
-Además emite un **Comprobante CEP-402** canónico firmado con **Ed25519** (exportando llave **SPKI** para verificación client-side con `crypto.subtle` + consulta directa al RPC público de Stellar Testnet), e integra **Raven MCP** (`https://raven.stellar.org/mcp`) en el Auditor Forense del Camino Rojo sin meter latencia ni IA en el firewall.
+Además emite un **Comprobante CEP-402** con **Cadena Original delimitada (`||...||`)** y **Sello Digital Ed25519**, publica el documento de descubrimiento **`/.well-known/cep402.json`** (llave SPKI para verificación client-side 4/4 con `crypto.subtle` + inspección binaria XDR contra el RPC público de Stellar Testnet), exporta en **JSON, XML (`ComprobanteCEP402`) y Póliza Contable CSV**, e integra **Raven MCP** (`https://raven.stellar.org/mcp` vía Streamable HTTP) en el Auditor Forense del Camino Rojo sin meter latencia ni IA en el firewall.
 
 ## Herramientas oficiales utilizadas
 
 - **x402 (`@x402/core@2.30.0`, `@x402/express@2.30.0`, `@x402/fetch@2.30.0`, `@x402/stellar@2.30.0`)** + Facilitador Dual local (`@x402/stellar/exact/facilitator`) con simulador explícito de Facilitador Comprometido / MITM para duelo Split-Screen.
-- **Soroban RPC (`@stellar/stellar-sdk@17.4.0`)** para verificación trustless y diagnóstico de contratos `C...`.
-- **Raven MCP (`https://raven.stellar.org/mcp`)** vía `partes/coronahernandezs931-cloud/auditor-raven.js` y `mcp.json`.
-- **OpenZeppelin Smart Accounts (Reto opcional):** detección polimórfica `payerType: "smart_account"`, extracción de `SorobanAuthorizationEntry` y diagnóstico forense CAP-46 / `#3221` vía RPC.
+- **Soroban RPC (`@stellar/stellar-sdk@17.4.0`)** con Pool Multi-RPC (`createFailoverRpcClient`) para verificación trustless y simulación de contratos `C...`.
+- **Raven MCP (`https://raven.stellar.org/mcp`)** vía `.mcp.json` y `partes/coronahernandezs931-cloud/auditor-raven.js` (handshake MCP `2025-03-26` + soporte JSON/SSE).
+- **OpenZeppelin Smart Accounts (Reto opcional):** detección polimórfica `payerType: "smart_account"`, extracción de `SorobanAuthorizationEntry`, lectura de `Contract.getFootprint()` y simulación live de `transfer(from=C...)` para diagnóstico CAP-46 / `#3221`.
 
 ## Cómo correrlo
 
@@ -31,10 +31,11 @@ Cada integrante explica cómo se corre su parte en `partes/<usuario>/README.md`.
 
 ```bash
 npm install
-npm test          # 16 pruebas deterministas offline (funciona incluso sin .env -> # fail 0)
-npm start         # UI Split-Screen + APIs Vanilla/CEP-402 en http://127.0.0.1:3000
-npm run preflight # Verifica saldos, trustlines USDC y Soroban RPC (requiere .env)
-npm run demo      # Corrida completa end-to-end en Stellar Testnet (requiere .env)
+npm test                            # 21 pruebas deterministas offline (funciona incluso sin .env -> # fail 0)
+npm start                           # UI Split-Screen + Validador Público en http://127.0.0.1:3000
+npm run preflight                   # Verifica saldos, trustlines USDC y Soroban RPC (requiere .env)
+npm run demo                        # Corrida completa end-to-end en Stellar Testnet (requiere .env)
+npm run verificar -- <txHash|json>  # Verificador CLI independiente contra Soroban RPC
 ```
 
 ## Hashes de prueba

@@ -7,7 +7,8 @@
     "test": "node --env-file-if-exists=.env --test",
     "start": "node --env-file-if-exists=.env partes/coronahernandezs931-cloud/server.js",
     "demo": "node --env-file-if-exists=.env partes/coronahernandezs931-cloud/live-demo.js",
-    "preflight": "node --env-file-if-exists=.env partes/coronahernandezs931-cloud/live-demo.js --preflight"
+    "preflight": "node --env-file-if-exists=.env partes/coronahernandezs931-cloud/live-demo.js --preflight",
+    "verificar": "node --env-file-if-exists=.env partes/coronahernandezs931-cloud/verificar-cli.js"
   },
   "repository": {
     "type": "git",
